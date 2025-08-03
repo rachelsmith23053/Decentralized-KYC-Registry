@@ -7,6 +7,10 @@
 (define-constant ERR_INVALID_LEVEL (err u105))
 (define-constant ERR_INVALID_PARAMS (err u102))
 
+(define-constant EXPIRY_WARNING_BLOCKS_30 u4320)
+(define-constant EXPIRY_WARNING_BLOCKS_7 u1008) 
+(define-constant EXPIRY_WARNING_BLOCKS_1 u144)
+
 (define-data-var audit-log-counter uint u0)
 
 (define-data-var contract-active bool true)
@@ -405,5 +409,91 @@
       )
     )
     (list)
+  )
+)
+
+
+(define-map expiry-notifications
+  { notification-id: uint }
+  {
+    user: principal,
+    expires-at: uint,
+    warning-level: uint,
+    notification-sent: bool,
+    created-at: uint
+  }
+)
+
+(define-map user-expiry-index
+  { user: principal }
+  { notification-id: uint, expires-at: uint }
+)
+
+(define-data-var notification-counter uint u0)
+
+(define-private (register-expiry-notification (user principal) (expires-at uint))
+  (let ((notification-id (+ (var-get notification-counter) u1)))
+    (var-set notification-counter notification-id)
+    (map-set expiry-notifications
+      { notification-id: notification-id }
+      {
+        user: user,
+        expires-at: expires-at,
+        warning-level: u30,
+        notification-sent: false,
+        created-at: stacks-block-height
+      }
+    )
+    (map-set user-expiry-index
+      { user: user }
+      { notification-id: notification-id, expires-at: expires-at }
+    )
+    notification-id
+  )
+)
+
+(define-public (create-expiry-notification (user principal) (expires-at uint))
+  (begin
+    (asserts! (var-get contract-active) ERR_UNAUTHORIZED)
+    (asserts! (is-authorized-verifier tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (> expires-at stacks-block-height) ERR_INVALID_PARAMS)
+    (ok (register-expiry-notification user expires-at))
+  )
+)
+
+(define-public (mark-notification-sent (notification-id uint))
+  (begin
+    (asserts! (var-get contract-active) ERR_UNAUTHORIZED)
+    (match (map-get? expiry-notifications { notification-id: notification-id })
+      notification (begin
+        (map-set expiry-notifications
+          { notification-id: notification-id }
+          (merge notification { notification-sent: true })
+        )
+        (ok true)
+      )
+      ERR_NOT_FOUND
+    )
+  )
+)
+
+(define-read-only (get-expiry-notification (notification-id uint))
+  (map-get? expiry-notifications { notification-id: notification-id })
+)
+
+(define-read-only (get-user-expiry-status (user principal))
+  (map-get? user-expiry-index { user: user })
+)
+
+(define-read-only (check-expiry-warnings (warning-blocks uint))
+  (let ((warning-threshold (+ stacks-block-height warning-blocks)))
+    warning-threshold
+  )
+)
+
+(define-read-only (is-expiring-soon (user principal) (warning-blocks uint))
+  (match (map-get? user-expiry-index { user: user })
+    expiry-info (< (get expires-at expiry-info) (+ stacks-block-height warning-blocks))
+    false
   )
 )
