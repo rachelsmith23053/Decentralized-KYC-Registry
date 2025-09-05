@@ -7,6 +7,10 @@
 (define-constant ERR_INVALID_LEVEL (err u105))
 (define-constant ERR_INVALID_PARAMS (err u102))
 
+(define-constant MIN_REPUTATION u100)
+(define-constant MAX_REPUTATION u1000)
+(define-constant DEFAULT_REPUTATION u500)
+
 (define-constant EXPIRY_WARNING_BLOCKS_30 u4320)
 (define-constant EXPIRY_WARNING_BLOCKS_7 u1008) 
 (define-constant EXPIRY_WARNING_BLOCKS_1 u144)
@@ -495,5 +499,116 @@
   (match (map-get? user-expiry-index { user: user })
     expiry-info (< (get expires-at expiry-info) (+ stacks-block-height warning-blocks))
     false
+  )
+)
+
+
+(define-map verifier-reputation
+  { verifier: principal }
+  {
+    current-score: uint,
+    total-verifications: uint,
+    successful-verifications: uint,
+    peer-reviews: uint,
+    positive-reviews: uint,
+    last-updated: uint
+  }
+)
+
+(define-map reputation-reviews
+  { reviewer: principal, verifier: principal }
+  {
+    score: uint,
+    reviewed-at: uint,
+    review-hash: (buff 32)
+  }
+)
+
+(define-public (initialize-verifier-reputation (verifier principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (is-none (map-get? verifier-reputation { verifier: verifier })) ERR_ALREADY_EXISTS)
+    (map-set verifier-reputation
+      { verifier: verifier }
+      {
+        current-score: DEFAULT_REPUTATION,
+        total-verifications: u0,
+        successful-verifications: u0,
+        peer-reviews: u0,
+        positive-reviews: u0,
+        last-updated: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (update-verifier-reputation (verifier principal) (was-successful bool))
+  (begin
+    (asserts! (is-authorized-verifier tx-sender) ERR_UNAUTHORIZED)
+    (match (map-get? verifier-reputation { verifier: verifier })
+      rep-data (let
+        (
+          (new-total (+ (get total-verifications rep-data) u1))
+          (new-successful (if was-successful (+ (get successful-verifications rep-data) u1) (get successful-verifications rep-data)))
+          (success-rate (/ (* new-successful u100) new-total))
+          (score-adjustment (if (> success-rate u80) u5 (if (< success-rate u60) (- u0 u10) u0)))
+          (new-score (+ (get current-score rep-data) score-adjustment))
+          (bounded-score (if (> new-score MAX_REPUTATION) MAX_REPUTATION (if (< new-score MIN_REPUTATION) MIN_REPUTATION new-score)))
+        )
+        (map-set verifier-reputation
+          { verifier: verifier }
+          (merge rep-data {
+            current-score: bounded-score,
+            total-verifications: new-total,
+            successful-verifications: new-successful,
+            last-updated: stacks-block-height
+          })
+        )
+        (ok bounded-score)
+      )
+      ERR_NOT_FOUND
+    )
+  )
+)
+
+(define-public (submit-peer-review (verifier principal) (score uint) (review-hash (buff 32)))
+  (begin
+    (asserts! (is-authorized-verifier tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (not (is-eq tx-sender verifier)) ERR_INVALID_PARAMS)
+    (asserts! (and (>= score u1) (<= score u10)) ERR_INVALID_PARAMS)
+    (asserts! (is-none (map-get? reputation-reviews { reviewer: tx-sender, verifier: verifier })) ERR_ALREADY_EXISTS)
+    (map-set reputation-reviews
+      { reviewer: tx-sender, verifier: verifier }
+      {
+        score: score,
+        reviewed-at: stacks-block-height,
+        review-hash: review-hash
+      }
+    )
+    (match (map-get? verifier-reputation { verifier: verifier })
+      rep-data (begin
+        (map-set verifier-reputation
+          { verifier: verifier }
+          (merge rep-data {
+            peer-reviews: (+ (get peer-reviews rep-data) u1),
+            positive-reviews: (if (>= score u7) (+ (get positive-reviews rep-data) u1) (get positive-reviews rep-data))
+          })
+        )
+        (ok true)
+      )
+      ERR_NOT_FOUND
+    )
+  )
+)
+
+(define-read-only (get-verifier-reputation (verifier principal))
+  (map-get? verifier-reputation { verifier: verifier })
+)
+
+(define-read-only (get-reputation-score (verifier principal))
+  (match (map-get? verifier-reputation { verifier: verifier })
+    rep-data (get current-score rep-data)
+    DEFAULT_REPUTATION
   )
 )
