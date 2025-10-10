@@ -612,3 +612,119 @@
     DEFAULT_REPUTATION
   )
 )
+
+
+(define-map kyc-challenges
+  { challenge-id: uint }
+  {
+    user: principal,
+    challenged-verifier: principal,
+    reason-hash: (buff 32),
+    created-at: uint,
+    status: (string-ascii 10),
+    votes-for: uint,
+    votes-against: uint,
+    resolved-at: uint
+  }
+)
+
+(define-map challenge-votes
+  { challenge-id: uint, voter: principal }
+  { vote: bool, voted-at: uint }
+)
+
+(define-data-var challenge-counter uint u0)
+
+(define-constant CHALLENGE_VOTE_THRESHOLD u3)
+(define-constant ERR_ALREADY_VOTED (err u106))
+(define-constant ERR_CHALLENGE_RESOLVED (err u107))
+
+(define-public (submit-kyc-challenge (reason-hash (buff 32)))
+  (begin
+    (asserts! (var-get contract-active) ERR_UNAUTHORIZED)
+    (match (map-get? kyc-records { user: tx-sender })
+      record (let ((new-id (+ (var-get challenge-counter) u1)))
+        (var-set challenge-counter new-id)
+        (map-set kyc-challenges
+          { challenge-id: new-id }
+          {
+            user: tx-sender,
+            challenged-verifier: (get verifier record),
+            reason-hash: reason-hash,
+            created-at: stacks-block-height,
+            status: "PENDING",
+            votes-for: u0,
+            votes-against: u0,
+            resolved-at: u0
+          }
+        )
+        (ok new-id)
+      )
+      ERR_NOT_FOUND
+    )
+  )
+)
+
+(define-public (vote-on-challenge (challenge-id uint) (vote-for bool))
+  (begin
+    (asserts! (is-authorized-verifier tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (is-none (map-get? challenge-votes { challenge-id: challenge-id, voter: tx-sender })) ERR_ALREADY_VOTED)
+    (match (map-get? kyc-challenges { challenge-id: challenge-id })
+      challenge (begin
+        (asserts! (is-eq (get status challenge) "PENDING") ERR_CHALLENGE_RESOLVED)
+        (map-set challenge-votes
+          { challenge-id: challenge-id, voter: tx-sender }
+          { vote: vote-for, voted-at: stacks-block-height }
+        )
+        (map-set kyc-challenges
+          { challenge-id: challenge-id }
+          (merge challenge {
+            votes-for: (if vote-for (+ (get votes-for challenge) u1) (get votes-for challenge)),
+            votes-against: (if vote-for (get votes-against challenge) (+ (get votes-against challenge) u1))
+          })
+        )
+        (ok true)
+      )
+      ERR_NOT_FOUND
+    )
+  )
+)
+
+(define-public (resolve-challenge (challenge-id uint))
+  (begin
+    (match (map-get? kyc-challenges { challenge-id: challenge-id })
+      challenge (let ((total-votes (+ (get votes-for challenge) (get votes-against challenge))))
+        (asserts! (>= total-votes CHALLENGE_VOTE_THRESHOLD) ERR_INVALID_PARAMS)
+        (asserts! (is-eq (get status challenge) "PENDING") ERR_CHALLENGE_RESOLVED)
+        (if (> (get votes-for challenge) (get votes-against challenge))
+          (begin
+            (map-set kyc-challenges { challenge-id: challenge-id }
+              (merge challenge { status: "UPHELD", resolved-at: stacks-block-height }))
+            (match (map-get? kyc-records { user: (get user challenge) })
+              record (begin
+                (map-set kyc-records { user: (get user challenge) }
+                  (merge record { is-active: false }))
+                (ok true)
+              )
+              (ok true)
+            )
+          )
+          (begin
+            (map-set kyc-challenges { challenge-id: challenge-id }
+              (merge challenge { status: "REJECTED", resolved-at: stacks-block-height }))
+            (ok false)
+          )
+        )
+      )
+      ERR_NOT_FOUND
+    )
+  )
+)
+
+(define-read-only (get-challenge (challenge-id uint))
+  (map-get? kyc-challenges { challenge-id: challenge-id })
+)
+
+(define-read-only (get-challenge-vote (challenge-id uint) (voter principal))
+  (map-get? challenge-votes { challenge-id: challenge-id, voter: voter })
+)
