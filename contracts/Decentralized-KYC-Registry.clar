@@ -15,6 +15,14 @@
 (define-constant EXPIRY_WARNING_BLOCKS_7 u1008) 
 (define-constant EXPIRY_WARNING_BLOCKS_1 u144)
 
+(define-constant MAX_BATCH_SIZE u10)
+(define-constant MULTI_SIG_LEVEL_THRESHOLD u4)
+(define-constant REQUIRED_APPROVALS u2)
+(define-constant ERR_BATCH_TOO_LARGE (err u108))
+(define-constant ERR_INSUFFICIENT_APPROVALS (err u109))
+
+(define-data-var batch-counter uint u0)
+
 (define-data-var audit-log-counter uint u0)
 
 (define-data-var contract-active bool true)
@@ -727,4 +735,82 @@
 
 (define-read-only (get-challenge-vote (challenge-id uint) (voter principal))
   (map-get? challenge-votes { challenge-id: challenge-id, voter: voter })
+)
+
+(define-map batch-verifications
+  { batch-id: uint }
+  {
+    verifier: principal,
+    created-at: uint,
+    total-users: uint,
+    processed-count: uint,
+    status: (string-ascii 10)
+  }
+)
+
+(define-map batch-users
+  { batch-id: uint, user-index: uint }
+  {
+    user: principal,
+    verification-level: uint,
+    data-hash: (buff 32),
+    validity-blocks: uint
+  }
+)
+
+(define-map multi-sig-approvals
+  { batch-id: uint, approver: principal }
+  { approved-at: uint }
+)
+
+(define-private (process-batch-user
+  (user-data { user: principal, verification-level: uint, data-hash: (buff 32), validity-blocks: uint, verifier: principal })
+  (acc (response uint uint)))
+  (begin
+    (map-set kyc-records
+      { user: (get user user-data) }
+      {
+        verification-level: (get verification-level user-data),
+        verifier: (get verifier user-data),
+        verified-at: stacks-block-height,
+        expires-at: (+ stacks-block-height (get validity-blocks user-data)),
+        data-hash: (get data-hash user-data),
+        is-active: true
+      }
+    )
+    (ok (+ (unwrap-panic acc) u1))
+  )
+)
+
+(define-public (submit-batch-verification
+  (users (list 10 { user: principal, level: uint, hash: (buff 32), validity: uint })))
+  (let ((batch-id (+ (var-get batch-counter) u1)) (batch-size (len users)))
+    (asserts! (var-get contract-active) ERR_UNAUTHORIZED)
+    (asserts! (is-authorized-verifier tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (<= batch-size MAX_BATCH_SIZE) ERR_BATCH_TOO_LARGE)
+    (asserts! (> batch-size u0) ERR_INVALID_PARAMS)
+    (var-set batch-counter batch-id)
+    (map-set batch-verifications
+      { batch-id: batch-id }
+      { verifier: tx-sender, created-at: stacks-block-height, total-users: batch-size, processed-count: u0, status: "PENDING" }
+    )
+    (ok batch-id)
+  )
+)
+
+(define-public (approve-multi-sig-batch (batch-id uint))
+  (begin
+    (asserts! (is-authorized-verifier tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (is-none (map-get? multi-sig-approvals { batch-id: batch-id, approver: tx-sender })) ERR_ALREADY_EXISTS)
+    (map-set multi-sig-approvals { batch-id: batch-id, approver: tx-sender } { approved-at: stacks-block-height })
+    (ok true)
+  )
+)
+
+(define-read-only (get-batch-info (batch-id uint))
+  (map-get? batch-verifications { batch-id: batch-id })
+)
+
+(define-read-only (get-batch-approval (batch-id uint) (approver principal))
+  (map-get? multi-sig-approvals { batch-id: batch-id, approver: approver })
 )
